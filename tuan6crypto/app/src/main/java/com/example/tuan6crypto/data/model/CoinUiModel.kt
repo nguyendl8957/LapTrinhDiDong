@@ -18,5 +18,7 @@ data class CoinUiModel(
     val type: CoinType,
     val priceUsd: Double? = null,
     val changePercent: Double? = null,
-    val priceHistory: List<Double> = emptyList()
+    val priceHistory: List<Double> = emptyList(),
+    val source: PriceSource? = null,
+    val currency: String = "USD"
 )

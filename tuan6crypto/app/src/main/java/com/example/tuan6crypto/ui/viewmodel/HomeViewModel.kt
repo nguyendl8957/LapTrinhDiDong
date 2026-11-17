@@ -3,18 +3,12 @@ package com.example.tuan6crypto.ui.viewmodel
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.tuan6crypto.data.model.CoinUiModel
+import com.example.tuan6crypto.data.model.*
 import com.example.tuan6crypto.data.repository.CryptoRepository
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
+import com.example.tuan6crypto.data.repository.FreshestQuoteSelector
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-
-import kotlinx.coroutines.async
-import kotlinx.coroutines.supervisorScope
 
 data class CryptoUiState(
     val coins: List<CoinUiModel> = emptyList(),
@@ -31,9 +25,10 @@ class HomeViewModel : ViewModel() {
     val uiState = _uiState.asStateFlow()
 
     private var pollingJob: Job? = null
-
-
     private var chartJob: Job? = null
+
+    // Cache các kết quả đã nhận từ bốn API.
+    private var quotes: List<MarketQuote> = emptyList()
 
     private var ethHistory: List<Double> = emptyList()
     private var btcHistory: List<Double> = emptyList()
@@ -44,58 +39,151 @@ class HomeViewModel : ViewModel() {
         startChartPolling()
 
         pollingJob = viewModelScope.launch {
-            while (isActive) {
-                try {
 
-                    val coins = repository.getCoins().map { coin ->
-                        val history = when (coin.type.symbol) {
-                            "ETH" -> ethHistory
-                            "BTC" -> btcHistory
-                            else -> emptyList()
-                        }
+            supervisorScope {
 
-                        coin.copy(
-                            priceHistory = if (
-                                history.isNotEmpty() && coin.priceUsd != null
-                            ) {
-                                history + coin.priceUsd
-                            } else {
-                                history
+                // Bốn coroutine được khởi chạy độc lập.
+                PriceSource.entries.forEach { source ->
+
+                    launch {
+                        while (isActive) {
+                            try {
+                                val result = when (source) {
+                                    PriceSource.KRAKEN ->
+                                        repository.fetchKraken()
+
+                                    PriceSource.BINANCE ->
+                                        repository.fetchBinance()
+
+                                    PriceSource.CRYPTO_COMPARE ->
+                                        repository.fetchCryptoCompare()
+
+                                    PriceSource.COIN_GECKO ->
+                                        repository.fetchCoinGecko()
+                                }
+
+                                // Kết quả nào về trước sẽ được
+                                // xử lý trước, không chờ API còn lại.
+                                publishQuotes(source, result)
+
+                                Log.d(
+                                    "CRYPTO_SOURCE",
+                                    "$source OK: ${result.size} coins"
+                                )
+
+                            } catch (e: CancellationException) {
+                                throw e
+
+                            } catch (e: Exception) {
+                                Log.e(
+                                    "CRYPTO_SOURCE",
+                                    "$source FAILED: ${e.message}",
+                                    e
+                                )
+
+                                // Lỗi một nguồn không làm dừng
+                                // ba nguồn còn lại.
+                                refreshVisibleCoins()
                             }
-                        )
-                    }
 
-                    _uiState.value = CryptoUiState(
-                        coins = coins,
-                        isLoading = false,
-                        error = null,
-                        updatedAtMillis = System.currentTimeMillis()
-                    )
+                            // Nguồn giao dịch cập nhật nhanh;
+                            // hai nguồn tổng hợp gọi chậm hơn
+                            // để tránh tiêu thụ hạn mức quá nhiều.
+                            val interval = when (source) {
+                                PriceSource.KRAKEN,
+                                PriceSource.BINANCE -> 5_000L
 
-                    Log.d(
-                        "CRYPTO_POLL",
-                        "Updated: " + coins.joinToString {
-                            "${it.type.symbol}=${it.priceUsd}"
+                                PriceSource.CRYPTO_COMPARE,
+                                PriceSource.COIN_GECKO -> 60_000L
+                            }
+
+                            delay(interval)
                         }
-                    )
-
-                } catch (e: CancellationException) {
-                    throw e
-
-                } catch (e: Exception) {
-                    _uiState.value = _uiState.value.copy(
-                        isLoading = false,
-                        error = e.message ?: "Network error"
-                    )
-
-                    Log.e("CRYPTO_POLL", "Update failed", e)
+                    }
                 }
-
-                delay(5_000L)
             }
         }
     }
 
+    private fun publishQuotes(
+        source: PriceSource,
+        incoming: List<MarketQuote>
+    ) {
+        // Thay dữ liệu cũ của đúng nguồn vừa trả về.
+        quotes = quotes.filterNot {
+            it.source == source
+        } + incoming
+
+        refreshVisibleCoins()
+    }
+
+    private fun historyFor(coin: CoinType): List<Double> {
+        val history = when (coin) {
+            CoinType.ETH -> ethHistory
+            CoinType.BTC -> btcHistory
+            else -> emptyList()
+        }
+
+        if (history.isEmpty()) return emptyList()
+
+        // OHLC lấy từ Kraken nên điểm cuối cũng dùng
+        // giá Kraken, không nối lẫn giá sàn khác.
+        val krakenPrice = quotes.firstOrNull {
+            it.coin == coin &&
+                    it.source == PriceSource.KRAKEN &&
+                    System.currentTimeMillis() -
+                    it.receivedAtMillis <= 120_000L
+        }?.priceUsd
+
+        return if (krakenPrice != null) {
+            history + krakenPrice
+        } else {
+            history
+        }
+    }
+
+    private fun refreshVisibleCoins() {
+        val now = System.currentTimeMillis()
+
+        val coins = CoinType.entries.map { type ->
+
+            val selected = FreshestQuoteSelector.select(
+                coin = type,
+                quotes = quotes,
+                nowMillis = now
+            )
+
+            Log.d(
+                "CRYPTO_WINNER",
+                "${type.symbol} | " +
+                        "source=${selected?.source} | " +
+                        "price=${selected?.priceUsd} | " +
+                        "timestamp=${selected?.priceUpdatedAtMillis} | " +
+                        "kind=${selected?.timeKind}"
+            )
+
+            CoinUiModel(
+                type = type,
+                priceUsd = selected?.priceUsd,
+                changePercent = selected?.change24hPercent,
+                priceHistory = historyFor(type),
+                source = selected?.source,
+                currency = selected?.currency ?: "USD"
+            )
+        }
+
+        val hasPrices = coins.any {
+            it.priceUsd != null
+        }
+
+        _uiState.value = CryptoUiState(
+            coins = coins,
+            isLoading = !hasPrices,
+            error = if (hasPrices) null
+            else "No valid market data",
+            updatedAtMillis = now
+        )
+    }
 
     private fun startChartPolling() {
         if (chartJob?.isActive == true) return
@@ -103,7 +191,6 @@ class HomeViewModel : ViewModel() {
         chartJob = viewModelScope.launch {
             while (isActive) {
                 try {
-                    // Lấy lịch sử ETH và BTC đồng thời.
                     val (eth, btc) = supervisorScope {
                         val ethRequest = async {
                             repository.getPriceHistory("ETHUSD")
@@ -119,36 +206,22 @@ class HomeViewModel : ViewModel() {
                     ethHistory = eth
                     btcHistory = btc
 
-                    // Cập nhật biểu đồ ngay nếu đã có giá Ticker.
-                    _uiState.value = _uiState.value.copy(
-                        coins = _uiState.value.coins.map { coin ->
-                            val history = when (coin.type.symbol) {
-                                "ETH" -> ethHistory
-                                "BTC" -> btcHistory
-                                else -> emptyList()
-                            }
+                    refreshVisibleCoins()
 
-                            coin.copy(
-                                priceHistory = if (
-                                    history.isNotEmpty() &&
-                                    coin.priceUsd != null
-                                ) {
-                                    history + coin.priceUsd
-                                } else {
-                                    history
-                                }
-                            )
-                        }
+                    Log.d(
+                        "CRYPTO_CHART",
+                        "ETH/BTC history loaded"
                     )
-
-                    Log.d("CRYPTO_CHART", "ETH/BTC history loaded")
 
                 } catch (e: CancellationException) {
                     throw e
 
                 } catch (e: Exception) {
-                    // Nếu biểu đồ lỗi, giá Ticker vẫn tiếp tục chạy.
-                    Log.e("CRYPTO_CHART", "OHLC failed", e)
+                    Log.e(
+                        "CRYPTO_CHART",
+                        "OHLC failed",
+                        e
+                    )
                 }
 
                 delay(60_000L)

@@ -14,6 +14,7 @@ import androidx.compose.ui.unit.sp
 import com.example.tuan6crypto.data.model.CoinUiModel
 import com.example.tuan6crypto.ui.theme.*
 import java.util.Locale
+import com.example.tuan6crypto.data.model.PriceSource
 
 @Composable
 fun FluctuationRow(
@@ -74,6 +75,21 @@ fun FluctuationRow(
                 text = changeText,
                 color = changeColor,
                 fontSize = 12.sp
+            )
+
+            val sourceName = when (coin.source) {
+                PriceSource.KRAKEN -> "Kraken · UTC"
+                PriceSource.BINANCE -> "Binance · USDT"
+                PriceSource.CRYPTO_COMPARE -> "CryptoCompare"
+                PriceSource.COIN_GECKO -> "CoinGecko"
+                null -> "No source"
+            }
+
+            Text(
+                text = sourceName,
+                color = CryptoMuted,
+                fontSize = 9.sp,
+                maxLines = 1
             )
         }
     }

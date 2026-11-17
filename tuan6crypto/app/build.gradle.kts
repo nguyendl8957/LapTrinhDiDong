@@ -1,3 +1,12 @@
+import java.util.Properties
+
+val secrets = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) {
+        file.inputStream().use { load(it) }
+    }
+}
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -17,6 +26,19 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+
+        buildConfigField(
+            "String",
+            "CRYPTOCOMPARE_KEY",
+            "\"${secrets.getProperty("CRYPTOCOMPARE_API_KEY", "")}\""
+        )
+
+        buildConfigField(
+            "String",
+            "COINGECKO_KEY",
+            "\"${secrets.getProperty("COINGECKO_API_KEY", "")}\""
+        )
     }
 
     buildTypes {
@@ -32,6 +54,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
